@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Audio Emotion Recognition</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <style>
+            .drag-active {
+                border-color: #3b82f6;
+                background-color: #eff6ff;
+            }
+        </style>
+    </head>
+    <body
+        class="bg-slate-900 text-white min-h-screen flex items-center justify-center font-sans"
+    >
+        <div class="w-full max-w-xl p-8 bg-slate-800 rounded-xl shadow-2xl">
+            <h1 class="text-3xl font-bold mb-6 text-center text-blue-400">
+                🎙️ Emotion Recognition
+            </h1>
+
+            <div class="mb-6">
+                <label class="block text-sm text-gray-400 mb-2"
+                    >Select Model</label
+                >
+                <select
+                    id="modelSelect"
+                    class="w-full p-3 bg-slate-700 rounded border border-slate-600 focus:border-blue-500 outline-none"
+                >
+                    <option value="" disabled selected>
+                        Loading models...
+                    </option>
+                </select>
+            </div>
+
+            <div
+                id="dropzone"
+                class="border-2 border-dashed border-slate-600 rounded-xl p-10 text-center transition-all cursor-pointer hover:border-slate-500"
+            >
+                <div id="dropText">
+                    <p class="text-xl mb-2">Drag & Drop Audio File</p>
+                    <p class="text-sm text-gray-400">
+                        or click to browse (.wav, .mp3)
+                    </p>
+                </div>
+                <div id="loading" class="hidden">
+                    <div
+                        class="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-500 mx-auto"
+                    ></div>
+                    <p class="mt-3 text-sm text-blue-400">
+                        Processing audio...
+                    </p>
+                </div>
+                <input
+                    type="file"
+                    id="fileInput"
+                    class="hidden"
+                    accept="audio/*"
+                />
+            </div>
+
+            <div id="resultArea" class="mt-8 hidden">
+                <div
+                    class="bg-slate-700 p-6 rounded-lg border-l-4 border-blue-500"
+                >
+                    <p class="text-sm text-gray-400 uppercase tracking-wide">
+                        Predicted Emotion
+                    </p>
+                    <h2
+                        id="emotionResult"
+                        class="text-4xl font-bold mt-1 capitalize text-white"
+                    >
+                        --
+                    </h2>
+                    <p
+                        id="confidenceResult"
+                        class="text-blue-300 mt-2 font-mono"
+                    >
+                        Confidence: --
+                    </p>
+                </div>
+
+                <div class="mt-4">
+                    <p class="text-sm text-gray-400 mb-2">Probabilities:</p>
+                    <div id="probsBars" class="space-y-2 text-xs"></div>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            const dropzone = document.getElementById("dropzone");
+            const fileInput = document.getElementById("fileInput");
+            const modelSelect = document.getElementById("modelSelect");
+            const resultArea = document.getElementById("resultArea");
+            const loading = document.getElementById("loading");
+            const dropText = document.getElementById("dropText");
+
+            fetch("/api/models/")
+                .then((res) => res.json())
+                .then((data) => {
+                    modelSelect.innerHTML = "";
+                    if (data.models.length === 0) {
+                        modelSelect.innerHTML =
+                            "<option disabled>No models found in /trained_models</option>";
+                    } else {
+                        data.models.forEach((m, idx) => {
+                            const opt = document.createElement("option");
+                            opt.value = m;
+                            opt.text = m;
+                            if (idx === 0) opt.selected = true;
+                            modelSelect.appendChild(opt);
+                        });
+                    }
+                });
+
+            ["dragenter", "dragover", "dragleave", "drop"].forEach(
+                (eventName) => {
+                    dropzone.addEventListener(
+                        eventName,
+                        preventDefaults,
+                        false,
+                    );
+                },
+            );
+
+            function preventDefaults(e) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+
+            ["dragenter", "dragover"].forEach((eventName) => {
+                dropzone.addEventListener(
+                    eventName,
+                    () => dropzone.classList.add("drag-active"),
+                    false,
+                );
+            });
+
+            ["dragleave", "drop"].forEach((eventName) => {
+                dropzone.addEventListener(
+                    eventName,
+                    () => dropzone.classList.remove("drag-active"),
+                    false,
+                );
+            });
+
+            dropzone.addEventListener("drop", handleDrop, false);
+            dropzone.addEventListener("click", () => fileInput.click());
+            fileInput.addEventListener("change", (e) =>
+                handleFiles(e.target.files),
+            );
+
+            function handleDrop(e) {
+                const dt = e.dataTransfer;
+                const files = dt.files;
+                handleFiles(files);
+            }
+
+            function handleFiles(files) {
+                if (files.length > 0) {
+                    uploadFile(files[0]);
+                }
+            }
+
+            function uploadFile(file) {
+                const modelName = modelSelect.value;
+                if (!modelName) {
+                    alert("Please select a model first");
+                    return;
+                }
+
+                dropText.classList.add("hidden");
+                loading.classList.remove("hidden");
+                resultArea.classList.add("hidden");
+
+                const formData = new FormData();
+                formData.append("audio", file);
+                formData.append("model_name", modelName);
+
+                fetch("/api/predict/", {
+                    method: "POST",
+                    body: formData,
+                })
+                    .then((response) => response.json())
+                    .then((data) => {
+                        loading.classList.add("hidden");
+                        dropText.classList.remove("hidden");
+
+                        if (data.error) {
+                            alert("Error: " + data.error);
+                        } else {
+                            displayResult(data);
+                        }
+                    })
+                    .catch((err) => {
+                        loading.classList.add("hidden");
+                        dropText.classList.remove("hidden");
+                        alert("Connection error");
+                        console.error(err);
+                    });
+            }
+
+            function displayResult(data) {
+                resultArea.classList.remove("hidden");
+                document.getElementById("emotionResult").innerText =
+                    data.emotion;
+                document.getElementById("confidenceResult").innerText =
+                    `Confidence: ${data.confidence}`;
+
+                const barsContainer = document.getElementById("probsBars");
+                barsContainer.innerHTML = "";
+
+                const sorted = Object.entries(data.probabilities).sort(
+                    (a, b) => b[1] - a[1],
+                );
+
+                sorted.forEach(([label, score]) => {
+                    const percent = (score * 100).toFixed(1);
+                    barsContainer.innerHTML += `
+                    <div class="flex items-center mb-1">
+                        <span class="w-24 font-bold uppercase text-gray-500 text-right pr-2">${label}</span>
+                        
+                        <div class="flex-1 h-2 bg-slate-600 rounded overflow-hidden">
+                            <div class="h-full bg-blue-500 transition-all duration-500" style="width: ${percent}%"></div>
+                        </div>
+                        
+                        <span class="ml-2 text-gray-400 w-12 text-right">${percent}%</span>
+                    </div>
+                `;
+                });
+            }
+        </script>
+    </body>
+</html>

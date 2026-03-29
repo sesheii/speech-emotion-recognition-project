@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+trained_models/HuBERT_Combined_best_model.pth
+mlflow.db
+mlruns/
+.trash/
+data/
+models/
+temp/
+src/models/temp/
