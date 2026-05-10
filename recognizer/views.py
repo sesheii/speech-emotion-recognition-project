@@ -8,6 +8,10 @@ import librosa
 import soundfile as sf
 from django.conf import settings
 from django.http import JsonResponse
+from rest_framework.decorators import api_view, parser_classes
+from rest_framework.parsers import MultiPartParser, FormParser
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
 from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
 from transformers import (
@@ -267,13 +271,73 @@ def get_models(request):
     return JsonResponse({"models": models})
 
 
-@csrf_exempt
+@swagger_auto_schema(
+    method='get',
+    operation_summary="Отримати список доступних моделей",
+    operation_description="Повертає масив імен файлів моделей, які завантажені на сервері.",
+    responses={
+        200: openapi.Response("Успішно", openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'models': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Schema(type=openapi.TYPE_STRING))
+            }
+        ))
+    }
+)
+@api_view(['GET'])
+def get_models(request):
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    models = [
+        f
+        for f in os.listdir(MODELS_DIR)
+        if f.endswith((".pth", ".pkl", ".h5", ".joblib"))
+    ]
+    return JsonResponse({"models": models})
+
+
+@swagger_auto_schema(
+    method='post',
+    operation_summary="Класифікація емоції з аудіо",
+    operation_description="Приймає аудіофайл (.wav, .mp3) та ім'я моделі, проводить попередню обробку та повертає передбачену емоцію.",
+    manual_parameters=[
+        openapi.Parameter(
+            name='audio',
+            in_=openapi.IN_FORM,
+            type=openapi.TYPE_FILE,
+            required=True,
+            description='Аудіофайл для аналізу'
+        ),
+        openapi.Parameter(
+            name='model_name',
+            in_=openapi.IN_FORM,
+            type=openapi.TYPE_STRING,
+            required=True,
+            description='Точна назва файлу моделі (наприклад, model_hubert.pth)'
+        ),
+    ],
+    consumes=['multipart/form-data'],
+    responses={
+        200: openapi.Response("Результат класифікації", openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'emotion': openapi.Schema(type=openapi.TYPE_STRING, description="Фінальна емоція"),
+                'confidence': openapi.Schema(type=openapi.TYPE_STRING, description="Впевненість моделі"),
+                'probabilities': openapi.Schema(type=openapi.TYPE_OBJECT, description="Розподіл по всіх 6 класах")
+            }
+        )),
+        400: "Помилка валідації вхідних даних",
+        500: "Внутрішня помилка сервера"
+    }
+)
+
+@api_view(['POST']) 
+@parser_classes([MultiPartParser, FormParser])
 def predict_emotion(request):
     if request.method != "POST":
         return JsonResponse({"error": "Only POST requests allowed"}, status=405)
 
-    audio_file = request.FILES.get("audio")
-    model_name = request.POST.get("model_name")
+    audio_file = request.FILES.get("audio") or request.data.get("audio")
+    model_name = request.POST.get("model_name") or request.data.get("model_name")
 
     if not audio_file or not model_name:
         return JsonResponse({"error": "Missing audio or model_name"}, status=400)
@@ -380,4 +444,160 @@ def predict_emotion(request):
 
     except Exception as e:
         print(f"Помилка в predict_emotion: {e}")
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@swagger_auto_schema(
+    method='post',
+    operation_summary="Класифікація емоцій по 3-секундних сегментах",
+    operation_description="Приймає аудіофайл і повертає масив результатів класифікації для кожного окремого 3-секундного сегмента.",
+    manual_parameters=[
+        openapi.Parameter(
+            name='audio',
+            in_=openapi.IN_FORM,
+            type=openapi.TYPE_FILE,
+            required=True,
+            description='Аудіофайл для аналізу'
+        ),
+        openapi.Parameter(
+            name='model_name',
+            in_=openapi.IN_FORM,
+            type=openapi.TYPE_STRING,
+            required=True,
+            description='Точна назва файлу моделі (наприклад, model_hubert.pth)'
+        ),
+    ],
+    consumes=['multipart/form-data'],
+    responses={
+        200: openapi.Response("Результат класифікації по сегментах", openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'segments': openapi.Schema(
+                    type=openapi.TYPE_ARRAY, 
+                    items=openapi.Schema(
+                        type=openapi.TYPE_OBJECT,
+                        properties={
+                            'segment_index': openapi.Schema(type=openapi.TYPE_INTEGER, description="Порядковий номер чанка"),
+                            'emotion': openapi.Schema(type=openapi.TYPE_STRING, description="Передбачена емоція для сегмента"),
+                            'confidence': openapi.Schema(type=openapi.TYPE_STRING, description="Впевненість моделі"),
+                            'probabilities': openapi.Schema(type=openapi.TYPE_OBJECT, description="Розподіл ймовірностей")
+                        }
+                    )
+                )
+            }
+        )),
+        400: "Помилка валідації вхідних даних",
+        500: "Внутрішня помилка сервера"
+    }
+)
+@api_view(['POST']) 
+@parser_classes([MultiPartParser, FormParser])
+def predict_emotion_segments(request):
+    if request.method != "POST":
+        return JsonResponse({"error": "Only POST requests allowed"}, status=405)
+
+    audio_file = request.FILES.get("audio") or request.data.get("audio")
+    model_name = request.POST.get("model_name") or request.data.get("model_name")
+
+    if not audio_file or not model_name:
+        return JsonResponse({"error": "Missing audio or model_name"}, status=400)
+
+    try:
+        chunks = process_and_chunk_in_memory(audio_file)
+        if not chunks:
+            return JsonResponse(
+                {"error": "Audio contains only silence or is unreadable"}, status=400
+            )
+
+        model_path = os.path.join(MODELS_DIR, model_name)
+
+        if model_name not in LOADED_MODELS:
+            if "HuBERT" in model_name:
+                config = AutoConfig.from_pretrained(
+                    "facebook/hubert-base-ls960", num_labels=6
+                )
+                model = AutoModelForAudioClassification.from_pretrained(
+                    "facebook/hubert-base-ls960", config=config
+                )
+                model.load_state_dict(torch.load(model_path, map_location=device))
+                model.to(device)
+                model.eval()
+                LOADED_MODELS[model_name] = {"model": model, "type": "hubert"}
+
+            elif "CRNN" in model_name:
+                model = ImprovedEmotionCRNN(num_stats_features=862, num_classes=6)
+                model.load_state_dict(torch.load(model_path, map_location=device))
+                model.to(device)
+                model.eval()
+
+                scaler_path = os.path.join(MODELS_DIR, "standard_scaler.pkl")
+                scaler = (
+                    joblib.load(scaler_path) if os.path.exists(scaler_path) else None
+                )
+                LOADED_MODELS[model_name] = {
+                    "model": model,
+                    "type": "crnn",
+                    "scaler": scaler,
+                }
+
+        active_model_data = LOADED_MODELS[model_name]
+        model = active_model_data["model"]
+        model_type = active_model_data["type"]
+
+        segments_results = []
+
+        for i, chunk in enumerate(chunks):
+            if model_type == "hubert":
+                inputs = processor(
+                    chunk, sampling_rate=TARGET_SR, return_tensors="pt", padding=True
+                )
+                input_values = inputs.input_values.to(device)
+
+                with torch.no_grad():
+                    outputs = model(input_values)
+
+                probs = F.softmax(outputs.logits, dim=1).squeeze().cpu().numpy()
+
+            elif model_type == "crnn":
+                stats_dict = extract_acoustic_features(chunk)
+                mel_dict = extract_mel_spectrogram(chunk)
+                hubert_dict = extract_hubert_features(
+                    chunk, processor, hubert_model, device
+                )
+
+                mel_array = np.array(list(mel_dict.values()), dtype=np.float32)
+                mel_tensor = torch.tensor(mel_array).view(1, 1, 128, 94).to(device)
+
+                combined_stats = {**stats_dict, **hubert_dict}
+                stats_array = np.array(
+                    list(combined_stats.values()), dtype=np.float32
+                ).reshape(1, -1)
+
+                scaler = active_model_data.get("scaler")
+                if scaler:
+                    stats_array = scaler.transform(stats_array)
+
+                stats_tensor = torch.tensor(stats_array).to(device)
+
+                with torch.no_grad():
+                    logits = model(mel_tensor, stats_tensor)
+
+                probs = F.softmax(logits, dim=1).squeeze().cpu().numpy()
+
+            pred_idx = np.argmax(probs)
+            final_emotion = EMOTIONS[pred_idx]
+            confidence = float(probs[pred_idx])
+            prob_dict = {EMOTIONS[j]: float(probs[j]) for j in range(len(EMOTIONS))}
+
+            segments_results.append({
+                "segment_index": i + 1,
+                "emotion": final_emotion,
+                "confidence": f"{confidence:.2f}",
+                "probabilities": prob_dict
+            })
+
+        return JsonResponse({"segments": segments_results})
+
+    except Exception as e:
+        print(f"Помилка в predict_emotion_segments: {e}")
         return JsonResponse({"error": str(e)}, status=500)

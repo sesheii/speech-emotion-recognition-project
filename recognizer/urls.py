@@ -5,4 +5,5 @@ urlpatterns = [
     path("", views.index, name="index"),
     path("api/models/", views.get_models, name="get_models"),
     path("api/predict/", views.predict_emotion, name="predict_emotion"),
+    path("api/predict/segments/", views.predict_emotion_segments, name="predict_emotion_segments"),
 ]
